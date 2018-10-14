@@ -14,73 +14,95 @@
     by Jialin Lu https://luxxxlucy.github.io
 *)
 
-DeepDreamStep[contentImg_, featureNet_] :=
 
- Module[{dims, net, trainingdata, trainStep},
+
+decoder = NetDecoder[{"Image"}];
+l2Loss = NetGraph[{MeanSquaredLossLayer[]}, {1 -> NetPort["Objective"]}];
+
+DeepDreamStep[contentImg_, featureNet_, iterStep_] :=
+
+ Module[{dims, trainingdata, trainStep, diff, absDiff},
   dims = Prepend[3]@Reverse@ImageDimensions[contentImg];
   net = NetGraph[
     <|"Image" ->
       ConstantArrayLayer[
        "Array" ->
-        NetEncoder[{"Image", ImageDimensions[contentImg]}]@ contentImg],
+        NetEncoder[{"Image", ImageDimensions[contentImg]}]@
+         contentImg],
      "imageFeat" -> NetReplacePart[featureNet, "Input" -> dims],
-     "l2Loss" -> l2Loss
-     |>,
+     "l2Loss" -> l2Loss|>,
     {
      "Image" -> "imageFeat",
-     {"imageFeat", NetPort["ZeroBaseTensor"]} -> "l2Loss" }
+     {"imageFeat", NetPort["ZeroBaseTensor"]} -> "l2Loss"
+     }
     ];
   trainingdata = <|
-    "ZeroBaseTensor" ->
-    { NetReplacePart[featureNet, "Input" -> dims][ NetEncoder[{"Image", ImageDimensions[contentImg]}] @ contentImg]*0}|>;
+    "ZeroBaseTensor" -> {
+      NetReplacePart[featureNet, "Input" -> dims][
+        NetEncoder[{"Image", ImageDimensions[contentImg]}]@
+         contentImg]*0}|>;
   trainStep = NetTrain[net,
     trainingdata,
     LossFunction -> {"Objective" -> Scaled[-1]},
     LearningRateMultipliers -> {"Image" -> 1, _ -> None},
-    (* TrainingProgressReporting ->
-     Function[decoder[#Weights[{"Image", "Array"}]]], *)
-    TrainingProgressReporting\[Rule] None,
-    MaxTrainingRounds -> 300,
-    Method -> {"SGD", "LearningRate" -> 25},
+    TrainingProgressReporting ->
+     Function[decoder[#Weights[{"Image", "Array"}]]],
+    (*TrainingProgressReporting\[Rule] None,*)
+    BatchSize -> 1,
+
+    MaxTrainingRounds -> iterStep,
+    Method -> {"SGD", "LearningRate" -> 1},
     TargetDevice -> "CPU"];
-  ShowResult[trainStep]
+  diff = ShowResult[trainStep];
+  absDiff = Nest[ Mean, ImageDifference[diff, contentImg], 2];
+  ImageSubtract[diff, contentImg]/absDiff*0.015
   ]
 
-(*
-    multi-scale process by so-called Octave.
-
-    A recursive way to do it.
-
-    Note that the Octave function do not return the modified image, but instead, the
-*)
-
-Octave[contentImg_, featureNet_, octave_, octaveScale_, jitter_] :=
-
+  Octave[contentImg_, featureNet_, iterStep_, octave_, octaveScale_,
+  jitter_] :=
  Module[
   {jitterTmp, diffImg, changedImg, jitterImg},
   If[octave <= 1,
    {
-    (* every time offset the image by an random jitter. *)
     jitterTmp = RandomInteger[{-jitter, jitter + 1}, 2];
     jitterImg =
      ImageTransformation[ contentImg, # + jitterTmp &,
       DataRange -> Full];
-    diffImg =
-     ImageSubtract[DeepDreamStep[jitterImg, featureNet], jitterImg];
-    (* and jitter back *)
+    diffImg = DeepDreamStep[jitterImg, featureNet, iterStep];
     diffImg =
      ImageTransformation[ diffImg,  # - jitterTmp &,
       DataRange -> Full];
+    diffImg
     },
    {
     diffImg =
      Octave[ImageResize[contentImg, Scaled[1/octaveScale]],
-      featureNet, octave - 1, octaveScale, jitter];
-    temp =
-     ImageAdd[ImageResize[diffImg, Scaled[octaveScale]],
-      DeepDreamStep[contentImg, featureNet] ];
-    diffImg = ImageSubtract[temp, contentImg]
+      featureNet, iterStep, octave - 1, octaveScale, jitter];
+    diffImg = ImageResize[diffImg, Scaled[octaveScale]];
+    currentDiff = DeepDreamStep[contentImg, featureNet, iterStep];
+
+    diffImg = ImageAdd[diffImg, currentDiff]
     }
    ];
   diffImg
+  ]
+
+OctaveStep[dreamSeed_, featureNet_, iterStep_, octave_, octaveScale_,
+  jitter_] :=
+
+ ImageAdd[
+  Octave[dreamSeed, featureNet, iterStep, octave, octaveScale,
+   jitter], dreamSeed]
+
+
+DeepDreamMaker[dreamSeed_, featureNet_, iterStep_, octave_,
+  octaveScale_, jitter_] :=
+ Module[{result},
+  result = dreamSeed;
+  Do[result =
+    OctaveStep[result, featureNet, iterStep, octave, octaveScale,
+     jitter]
+   , {1}
+   ];
+  result
   ]
