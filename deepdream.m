@@ -14,89 +14,65 @@
     by Jialin Lu https://luxxxlucy.github.io
 *)
 
-
-
 decoder = NetDecoder[{"Image"}];
-l2Loss = NetGraph[{MeanSquaredLossLayer[]}, {1 -> NetPort["Objective"]}];
 
-DeepDreamStep[contentImg_, featureNet_, iterStep_] :=
+DeepDreamStep[contentImg_, featureNet_, jitter_, iterStep_] :=
 
- Module[{dims, trainingdata, trainStep, diff, absDiff},
-  dims = Prepend[3]@Reverse@ImageDimensions[contentImg];
-  net = NetGraph[
-    <|"Image" ->
-      ConstantArrayLayer[
-       "Array" ->
-        NetEncoder[{"Image", ImageDimensions[contentImg]}]@
-         contentImg],
-     "imageFeat" -> NetReplacePart[featureNet, "Input" -> dims],
-     "l2Loss" -> l2Loss|>,
-    {
-     "Image" -> "imageFeat",
-     {"imageFeat", NetPort["ZeroBaseTensor"]} -> "l2Loss"
-     }
-    ];
-  trainingdata = <|
-    "ZeroBaseTensor" -> {
-      NetReplacePart[featureNet, "Input" -> dims][
-        NetEncoder[{"Image", ImageDimensions[contentImg]}]@
-         contentImg]*0}|>;
-  trainStep = NetTrain[net,
-    trainingdata,
-    LossFunction -> {"Objective" -> Scaled[-1]},
-    LearningRateMultipliers -> {"Image" -> 1, _ -> None},
-    TrainingProgressReporting ->
-     Function[decoder[#Weights[{"Image", "Array"}]]],
-    (*TrainingProgressReporting\[Rule] None,*)
-    BatchSize -> 1,
+ Module[{step, absDiff, targetDimension, processingImg = contentImg,
+   jitterTmp, jitterImg},
+  Do[
+   jitterTmp = RandomInteger[{-jitter, jitter + 1}, 2];
+   jitterImg =
+    ImageTransformation[ processingImg, # + jitterTmp &,
+     DataRange -> Full];
+   step =
+    featureNet[<| "Input" -> jitterImg|>, NetPortGradient["Input"]];
+   absDiff = Nest[Mean, Abs@ step, 3];
+   step = step/absDiff*(1.5/255);
+   step = Image[TensorTranspose[step, {3, 2, 1}]];
+   targetDimension =
+    Reverse@Take[Dimensions@ImageData@contentImg, 2];
 
-    MaxTrainingRounds -> iterStep,
-    Method -> {"SGD", "LearningRate" -> 1},
-    TargetDevice -> "CPU"];
-  diff = ShowResult[trainStep];
-  absDiff = Nest[ Mean, ImageDifference[diff, contentImg], 2];
-  ImageSubtract[diff, contentImg]/absDiff*0.015
-  ]
+   step = ImageResize[step, targetDimension, Resampling -> "Linear"];
+   step =
+    ImageTransformation[ step,  # - jitterTmp &, DataRange -> Full];
+   processingImg = ImageAdd[processingImg, step]
+   , {iterStep}
 
-  Octave[contentImg_, featureNet_, iterStep_, octave_, octaveScale_,
-  jitter_] :=
- Module[
-  {jitterTmp, diffImg, changedImg, jitterImg},
-  If[octave <= 1,
-   {
-    jitterTmp = RandomInteger[{-jitter, jitter + 1}, 2];
-    jitterImg =
-     ImageTransformation[ contentImg, # + jitterTmp &,
-      DataRange -> Full];
-    diffImg = DeepDreamStep[jitterImg, featureNet, iterStep];
-    diffImg =
-     ImageTransformation[ diffImg,  # - jitterTmp &,
-      DataRange -> Full];
-    diffImg
-    },
-   {
-    diffImg =
-     Octave[ImageResize[contentImg, Scaled[1/octaveScale]],
-      featureNet, iterStep, octave - 1, octaveScale, jitter];
-    diffImg = ImageResize[diffImg, Scaled[octaveScale]];
-    currentDiff = DeepDreamStep[contentImg, featureNet, iterStep];
-
-    diffImg = ImageAdd[diffImg, currentDiff]
-    }
    ];
-  diffImg
+  ImageSubtract[processingImg, contentImg]
+
   ]
 
-OctaveStep[dreamSeed_, featureNet_, iterStep_, octave_, octaveScale_,
-  jitter_] :=
+Octave[contentImg_, featureNet_, iterStep_, octave_, octaveScale_, jitter_] :=
+   Module[
+    {jitterTmp, diffImg, changedImg},
+    If[octave <= 1,
+     {
+      diffImg =
+       DeepDreamStep[contentImg, featureNet, jitter, iterStep];
+      diffImg
+      },
+     {
+      diffImg =
+       Octave[ImageResize[contentImg, Scaled[1/octaveScale]],
+        featureNet, iterStep, octave - 1, octaveScale, jitter];
+      diffImg = ImageResize[diffImg, Scaled[octaveScale]];
+      currentDiff =
+       DeepDreamStep[contentImg, featureNet, jitter, iterStep];
 
+      diffImg = ImageAdd[diffImg, currentDiff]
+      }
+     ];
+    diffImg
+    ]
+
+OctaveStep[dreamSeed_, featureNet_, iterStep_, octave_, octaveScale_, jitter_] :=
  ImageAdd[
   Octave[dreamSeed, featureNet, iterStep, octave, octaveScale,
    jitter], dreamSeed]
 
-
-DeepDreamMaker[dreamSeed_, featureNet_, iterStep_, octave_,
-  octaveScale_, jitter_] :=
+DeepDreamMaker[dreamSeed_, featureNet_, iterStep_, octave_, octaveScale_, jitter_] :=
  Module[{result},
   result = dreamSeed;
   Do[result =
